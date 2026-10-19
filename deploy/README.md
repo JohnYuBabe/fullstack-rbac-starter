@@ -1,17 +1,19 @@
-# 部署到 johnyu.wancafu.com/rbac/
+# 部署到 <你的域名>/rbac/
 
-与同机的 `/console/` 站点共存（同一个域名、同一个 Nginx），因此下面每一项都与它错开：
-端口 `3020`（`/console/` 用 3010）、MySQL 映射 `3309`（`/console/` 用 3308）、
+下面以「与同机另一个站点共存（同一个域名、同一个 Nginx）」为前提，因此每个值都与它错开：
+端口 `3020`（假设对方用 3010）、MySQL 映射 `3309`（对方用 3308）、
 容器名 `rbac-*`、卷 `rbac-mysql-data`、前端 token key `vibe_rbac_token`。
+单站点部署时这些值可以按自己的机器调整；`VITE_BASE`、`VITE_API_BASE`、nginx 片段和
+`deploy/build-web.sh` 的默认值是一套的，改前缀要一起改。
 
 ## 1. 服务器上的目录
 
 ```bash
 sudo mkdir -p /opt/fullstack-rbac-starter /var/www/rbac
-sudo chown -R ubuntu:ubuntu /opt/fullstack-rbac-starter /var/www/rbac
+sudo chown -R <user>:<user> /opt/fullstack-rbac-starter /var/www/rbac
 ```
 
-两个目录都要交给 `ubuntu`：后面的 `rsync` 发布前端时没有 `sudo`，目录若归 root，
+两个目录都要交给部署用户：后面的 `rsync` 发布前端时没有 `sudo`，目录若归 root，
 会直接 `Permission denied`。
 
 ## 2. 同步代码
@@ -22,13 +24,13 @@ sudo chown -R ubuntu:ubuntu /opt/fullstack-rbac-starter /var/www/rbac
 rsync -az --delete \
   --exclude node_modules --exclude .git --exclude dist \
   --exclude .env --exclude .env.deploy --exclude '*.log' \
-  ./ ubuntu@<your-server>:/opt/fullstack-rbac-starter/
+  ./ <user>@<your-server>:/opt/fullstack-rbac-starter/
 ```
 
 ## 3. 生产 .env
 
 ```bash
-ssh ubuntu@<your-server>
+ssh <user>@<your-server>
 cd /opt/fullstack-rbac-starter
 cp .env.example .env
 # 至少替换：MYSQL_ROOT_PASSWORD / MYSQL_PASSWORD / JWT_SECRET / ADMIN_PASSWORD
@@ -36,8 +38,12 @@ cp .env.example .env
 openssl rand -hex 24
 ```
 
-`.env` 只给后端运行时用，`docker compose` 与 Nest 读它。前端构建另用一份 `.env.deploy`
-（见第 5 节），两份都不进仓库。
+`.env` 主要给后端运行时用（`docker compose` 与 Nest 读它）。注意前端构建也会读根目录
+`.env`：Vite 的 `envDir` 指向仓库根，所以那里的 `VITE_*` 都会参与构建；部署相关的
+`VITE_*` 由 `.env.deploy` 经 `deploy/build-web.sh` 显式覆盖（见第 5 节）。两份都不进仓库。
+
+`ADMIN_EMAIL` 用专用地址，不要填个人邮箱：公开演示时 `DEMO_ADMIN` 能通过用户接口读到
+库里所有账号的邮箱（见文末「已知限制」）。
 
 ## 4. 启动后端
 
@@ -69,17 +75,18 @@ sudo docker compose up -d --force-recreate server
 已经构建好的 bundle，必须重新构建一次。
 
 **在第 2 节那台同步过代码的机器上构建**（通常是本机）。不要指望直接在生产服务器上构建：
-那里装的可能还是旧版 Node，仓库要求 Node 20+ 与 pnpm 8。
+那里装的可能还是旧版 Node；仓库要求 Node 20.19+ 或 22.12+ 与 pnpm 8。
 
 构建脚本从一个显式的环境文件读变量，不依赖 shell 里偶然残留的 `export`；
 该文件用「KEY=VALUE」解析，不会被执行（`$(...)` 不会被求值），
 被 `.gitignore` 的 `.env.*` 覆盖，不会进仓库。
 
-`.env` 是服务端运行时读的；构建前端另用一份 `.env.deploy`，只放下面这几个变量，
-不参与后端启动：
+构建前端另用一份 `.env.deploy`，只放下面这几个变量，不参与后端启动。它是构建期这些变量的
+来源（`--define` 除外）：脚本会忽略 shell 里残留的同名 `VITE_*` / `DEMO_*`，再用文件值
+覆盖根目录 `.env` 里的 `VITE_BASE`、`VITE_API_BASE` 与六个演示账号：
 
 ```bash
-cp .env.example .env.deploy
+cp .env.deploy.example .env.deploy
 
 # .env.deploy 里至少有：
 #   VITE_BASE=/rbac/
@@ -89,11 +96,18 @@ cp .env.example .env.deploy
 
 ./deploy/build-web.sh --env .env.deploy --print   # 先确认解析出的 base 与账号
 ./deploy/build-web.sh --env .env.deploy           # 构建
-rsync -a --delete apps/web/dist/ ubuntu@<your-server>:/var/www/rbac/
+rsync -a --delete apps/web/dist/ <user>@<your-server>:/var/www/rbac/
 ```
 
-不打算公开演示账号时加 `--no-demo`：登录页不再显示一键填入，bundle 里也不会出现任何口令。
-`--allow-root-base` 只在确实部署在根路径时用；`--define KEY=VALUE` 可以临时覆盖单个变量。
+不要用 `.env.example` 复制出 `.env.deploy`：那份模板的 `VITE_BASE=/` 是根路径值，
+构建脚本会直接拒绝（部署到 `/rbac/` 会白屏）。
+
+不打算公开演示账号时加 `--no-demo`：登录页不再显示一键填入，bundle 里不会出现任何口令。
+脚本会把六个 `VITE_DEMO_*` 显式置空以覆盖根目录 `.env` 里的同名值，
+构建末尾的 `assert-build.mjs` 再拿 `.env.deploy` 与根目录 `.env` 里的演示口令逐个对照产物，
+命中任何一条就构建失败。
+`--allow-root-base` 只在确实部署在根路径时用；`--define KEY=VALUE` 可以临时覆盖单个 `VITE_*` 变量
+（服务端的 `DEMO_*`、`ADMIN_*` 不在覆盖范围内）。
 
 登录页的一键填入读 `VITE_DEMO_*`，口令会留在 bundle 里，所以只能放公开 demo 账号。
 既没有 `VITE_DEMO_*` 也没有 `DEMO_*`、或者加了 `--no-demo` 时，登录页不显示一键填入。
@@ -109,13 +123,16 @@ rsync -a --delete apps/web/dist/ ubuntu@<your-server>:/var/www/rbac/
 都堵住：
 
 ```bash
+# 站点配置文件的位置随发行版/面板而异，换成你自己的路径：
+#   发行版默认：/etc/nginx/sites-enabled/<site>.conf 或 /etc/nginx/conf.d/<site>.conf
+#   宝塔面板示例：/www/server/panel/vhost/nginx/<your-domain>.conf
 sudo python3 deploy/apply-nginx.py \
-  --config /www/server/panel/vhost/nginx/johnyu.wancafu.com.conf \
-  --server-name johnyu.wancafu.com --dry-run
+  --config <站点配置> \
+  --server-name <your-domain> --dry-run
 
 sudo python3 deploy/apply-nginx.py \
-  --config /www/server/panel/vhost/nginx/johnyu.wancafu.com.conf \
-  --server-name johnyu.wancafu.com
+  --config <站点配置> \
+  --server-name <your-domain>
 ```
 
 脚本按 nginx 自己的词法规则解析配置（引号、转义、注释、正则里的量词），只在
@@ -139,22 +156,34 @@ python3 deploy/test_apply_nginx.py
 正则一命中就压过普通前缀（与书写顺序无关）——不加 `^~` 会表现为页面白屏、静态资源 404。
 
 ```bash
-curl -I https://johnyu.wancafu.com/rbac/
-curl -fsS https://johnyu.wancafu.com/rbac/healthz
+curl -I https://<your-domain>/rbac/
+curl -fsS https://<your-domain>/rbac/healthz
 ```
 
 ## 7. 上线后的固定检查
 
 ```bash
 # 未登录访问接口必须是 401
-curl -s -o /dev/null -w '%{http_code}\n' https://johnyu.wancafu.com/rbac/api/articles
+curl -s -o /dev/null -w '%{http_code}\n' https://<your-domain>/rbac/api/articles
 
 # 首页 200 且页面里引用的是 /rbac/assets/
-curl -s https://johnyu.wancafu.com/rbac/ | grep -o '/rbac/assets/[^"]*' | head -1
+curl -s https://<your-domain>/rbac/ | grep -o '/rbac/assets/[^"]*' | head -1
 ```
 
 ## 已知限制
 
 - 演示账号的密码会被打进前端 bundle，站点因此对所有人可写。演示库里不要放真实数据。
+- 公开演示的隐私后果：拿到 `DEMO_ADMIN` 的人可以读到库里所有账号的邮箱，也能在审计日志里
+  看到其他访客写操作的来源 IP。`ADMIN_EMAIL` 必须是专用地址，库里不要放真实用户。
+  服务端不区分「演示请求」与「自己的请求」，所以这件事只能靠不放入真实数据来控制。
+- 公开写没有总量配额：每 IP 每分钟 120 次，单篇正文上限 2 万字，MySQL 卷没有磁盘上限。
+  长期公开的演示站要定期重建：
+
+  ```bash
+  sudo docker compose down
+  sudo docker volume rm rbac-mysql-data
+  sudo docker compose up -d mysql server   # 再按第 4 节重新 seed
+  ```
+
 - 审计日志只覆盖文章与用户的写操作，不含登录与读取。
 - 单工作区：没有按部门/项目的对象级授权，`article:read` 能看到全部文章。

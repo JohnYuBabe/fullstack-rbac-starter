@@ -1,5 +1,31 @@
 # fullstack-rbac-starter
 
+**Vue 3 + NestJS + Prisma 的权限脚手架：权限串只定义一次，菜单、路由、按钮、接口判定四处用同一份数据。**
+
+[![CI](https://github.com/JohnYuBabe/fullstack-rbac-starter/actions/workflows/ci.yml/badge.svg)](https://github.com/JohnYuBabe/fullstack-rbac-starter/actions/workflows/ci.yml)
+
+**在线演示：<https://johnyu.wancafu.com/rbac/>** — 登录页可一键填入管理员 / 编辑 / 访客三个账号，不用记口令。
+线上账号与下面本地开发用的 `admin@example.com` 那组不是同一批。演示站对所有人可写
+（demo 口令就在前端 bundle 里），数据只当演示数据用；重建方式见部署文档。
+
+## 演示
+
+下面这段录屏约 22 秒，是本地开发实例上的真实操作：管理员看得到四个菜单；编辑能写文章但看不到用户管理，
+直接输地址会被路由守卫拦到 403；访客连「新建文章」按钮都没有。截图与录屏用的是本地开发账号
+（`admin@example.com` 那组）；线上演示站的一键填入是另一组 `demo-*` 账号，角色与权限完全一样。
+
+![三角色权限演示](docs/demo.gif)
+
+| 截图 | 说明 |
+| --- | --- |
+| ![登录页：三个角色一键填入](docs/screenshots/login.png) | 登录页：三个本地开发账号一键填入 |
+| ![管理员：用户与角色管理](docs/screenshots/users.png) | 管理员：改角色、看权限数量 |
+| ![编辑：能写文章，没有删除](docs/screenshots/articles-editor.png) | 编辑：能新建/编辑，没有删除 |
+| ![编辑访问用户管理被拦到 403](docs/screenshots/forbidden.png) | 绕过菜单直接输地址：403 |
+| ![审计日志记录前后值](docs/screenshots/audit.png) | 每次写操作带操作人、角色与前后值 |
+
+## 它解决什么
+
 一个可以直接起项目用的权限脚手架：**权限串只定义一次**，菜单、路由、按钮、接口判定四处用同一份数据。
 
 - 权限用 `资源:动作` 表示（`article:update`、`user:manage`），不是接口路径列表。
@@ -48,14 +74,15 @@ PERMISSION_LIST (packages/shared/src/permissions.ts)
 
 ## 本地启动
 
-需要 Node.js 20+ 与 pnpm 8（`corepack enable` 会按根 `package.json` 的 `packageManager` 启用），
+需要 **Node.js 20.19+ 或 22.12+**（Vite 7 的要求，`.nvmrc` 写的是 22）与 pnpm 8，
 以及 Docker（只用于起 MySQL）。
 
 ```bash
+corepack enable             # 按根 package.json 的 packageManager 启用 pnpm 8
 cp .env.example .env        # 按注释替换 CHANGE_ME_*
 pnpm install
 pnpm --filter @rbac/shared build   # seed / server 都从 dist 引用它，必须先构建
-pnpm db:up                  # MySQL 8，映射到 127.0.0.1:3309
+pnpm db:up                  # MySQL 8，映射到 127.0.0.1:3309；--wait 会等它真正 ready
 pnpm db:migrate
 pnpm db:seed
 pnpm dev
@@ -66,7 +93,7 @@ pnpm dev
 
 `pnpm db:migrate` 走的是 `prisma migrate dev`，需要临时创建 shadow database。compose 里的
 `rbac` 用户只有单库权限，若报 `P3014`，改用 root 连接执行一次，或直接
-`pnpm --filter @rbac/server prisma:deploy` 应用仓库里已有的迁移。
+`pnpm --filter @rbac/server prisma:deploy` 应用仓库里已有的迁移（该脚本会显式读取根目录 `.env`）。
 
 本地开发时，Nest 的 `ConfigModule` 与 Vite 都读根目录的 `.env`（`VITE_BASE=/`、
 `VITE_API_BASE=/api`）。部署到 `/rbac/` 时换一份 `.env.deploy`，由
@@ -132,7 +159,9 @@ E2E 走真实 HTTP（随机端口 + fetch），覆盖：无 token 401、viewer �
 见 [`deploy/README.md`](deploy/README.md)。要点：
 
 - 端口 `3020`（宿主回环）/ MySQL `3309` / 卷 `rbac-mysql-data`，专为与同机其它项目共存而错开。
-- 前端 token key 是 `vibe_rbac_token`；同域多站点共用 `localStorage` 时不会互相踢下线。
+- 前端 token key 是 `vibe_rbac_token`，同域多个项目共用一个域名时不会互相覆盖登录态。
+  注意 `localStorage` 按 origin 共享、不按路径隔离：同一域名下其它站点的脚本也能读到这个 token。
+  需要隔离就把站点放到独立子域，或改成服务端下发的 HttpOnly cookie（本项目未实现）。
 - `/rbac/` 的 nginx location 必须**合并**进现有站点配置，不能整份覆盖。
 - 前端用 `deploy/build-web.sh --env .env.deploy` 构建：子路径前缀与演示账号是构建期注入的，
   变量落在一个显式文件里，换台机器也能构建出同一份产物。
@@ -146,6 +175,11 @@ E2E 走真实 HTTP（随机端口 + fetch），覆盖：无 token 401、viewer �
 - 分享给公开演示站时，三个 demo 账号的口令会被打进前端 bundle。其中 `DEMO_ADMIN` 拥有完整管理员权限，
   任何人都能用它改角色、删用户、删文章——不只是「可写」。演示库一律视为可丢弃，不要放真实数据，
   也不要复用任何真实账号。
+- 公开演示的连带后果：拿到 `DEMO_ADMIN` 的人可以调用用户接口读到库里**全部账号的邮箱**，
+  也可以在审计日志里看到其他访客写操作时记录的**来源 IP**。所以演示部署的 `ADMIN_EMAIL`
+  必须是专用地址（不要用个人邮箱），库里也不要放真实用户。
+- 公开写没有总量配额：限流只有每 IP 每分钟 120 次，单篇文章正文上限 2 万字，MySQL 卷没有磁盘上限。
+  长期公开的演示站要定期重建数据卷，见 [deploy/README.md](deploy/README.md)。
 - 审计只覆盖文章与用户的写操作，不含登录与读取。
 - 角色是全局的，不支持「用户 A 在项目 1 是编辑、在项目 2 是访客」。
 - 服务端生产镜像沿用同一套依赖（含 `tsc`、`jest` 等 devDependencies），镜像体积偏大。

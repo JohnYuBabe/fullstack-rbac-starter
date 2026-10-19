@@ -16,7 +16,8 @@
 #   三个演示账号可以直接写 VITE_DEMO_*_EMAIL / VITE_DEMO_*_PASSWORD，
 #   也可以只写服务端的 DEMO_*_EMAIL / DEMO_*_PASSWORD —— 脚本会把它们
 #   映射成 VITE_ 版本，保证登录页一键填入的账号与服务端 seed 完全一致。
-#   不部署公开演示站时加 --no-demo，bundle 里不会出现任何口令。
+#   不部署公开演示站时加 --no-demo：六个 VITE_DEMO_* 会被显式置空（覆盖根目录
+#   .env 里的同名值），bundle 里不会出现任何口令。
 set -euo pipefail
 
 # --env 相对当前工作目录解析，不能跟着后面的 cd 跑
@@ -98,10 +99,13 @@ load_env() {
   done < "$file"
 }
 
-# 先清掉 shell 里可能残留的同名变量，结果只由「环境文件 + --define + 默认值」决定
+# 先清掉 shell 里可能残留的同名变量，结果只由「环境文件 + --define + 默认值」决定。
+# DEMO_* 也要清：下面的映射会拿它兜底，不清的话 `set -a; source .env` 之后的 shell
+# 会把服务端口令悄悄带进构建，和环境文件写没写完全无关。
 unset VITE_BASE VITE_API_BASE
 for role in ADMIN EDITOR VIEWER; do
   unset "VITE_DEMO_${role}_EMAIL" "VITE_DEMO_${role}_PASSWORD"
+  unset "DEMO_${role}_EMAIL" "DEMO_${role}_PASSWORD"
 done
 
 load_env "$ENV_FILE"
@@ -115,6 +119,19 @@ for pair in ${DEFINES+"${DEFINES[@]}"}; do
   esac
   [ "$pair" != "$key" ] || die "--define 需要 KEY=VALUE 形式：$pair"
   printf -v "$key" '%s' "$value"
+done
+
+# --no-demo 构建到底该禁止哪些口令：环境文件里出现的 VITE_DEMO_* 与 DEMO_*
+# 都算（根目录 .env 的那份由 assert-build 自己再读一次）。置空之后再收集就晚了，
+# 所以在 --no-demo 处理之前先记下来。
+RBAC_FORBIDDEN_SECRETS=""
+for role in ADMIN EDITOR VIEWER; do
+  for name in "VITE_DEMO_${role}_PASSWORD" "DEMO_${role}_PASSWORD"; do
+    value="${!name:-}"
+    if [ -n "$value" ]; then
+      RBAC_FORBIDDEN_SECRETS+="${value}"$'\n'
+    fi
+  done
 done
 
 VITE_BASE="${VITE_BASE:-/rbac/}"
@@ -144,10 +161,17 @@ if [ "$VITE_BASE" != "/" ]; then
 fi
 
 DEMO_SOURCE=""
+# 不要从 shell 继承这个标志：外部残留 =1 会让普通演示构建被误判成 --no-demo 而失败
+RBAC_BUILD_NO_DEMO=0
 if [ "$NO_DEMO" = "1" ]; then
+  # 必须显式设成空串，不能 unset：Vite 的 loadEnv 会把根目录 .env 里的
+  # VITE_DEMO_* 读进来，只有进程环境里存在的变量才会覆盖它。
+  # unset 之后 .env 的值照样生效，前面的承诺就是假的。
   for role in ADMIN EDITOR VIEWER; do
-    unset "VITE_DEMO_${role}_EMAIL" "VITE_DEMO_${role}_PASSWORD"
+    printf -v "VITE_DEMO_${role}_EMAIL" '%s' ''
+    printf -v "VITE_DEMO_${role}_PASSWORD" '%s' ''
   done
+  RBAC_BUILD_NO_DEMO=1
   DEMO_SOURCE="已关闭（--no-demo）"
 else
   # 演示账号：VITE_DEMO_* 优先，没有就从服务端的 DEMO_* 映射
@@ -171,6 +195,8 @@ export VITE_BASE VITE_API_BASE
 for role in ADMIN EDITOR VIEWER; do
   export "VITE_DEMO_${role}_EMAIL" "VITE_DEMO_${role}_PASSWORD"
 done
+# 让 assert-build 在 --no-demo 构建里额外断言：bundle 中不含任何演示口令
+export RBAC_BUILD_NO_DEMO RBAC_FORBIDDEN_SECRETS
 
 if [ "$PRINT" = "1" ]; then
   echo "环境文件：$ENV_FILE"

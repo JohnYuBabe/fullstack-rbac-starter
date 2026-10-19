@@ -54,6 +54,43 @@ for (const secret of ['admin123', 'editor123', 'viewer123', 'dev-secret-change-m
   }
 }
 
+// deploy/build-web.sh --no-demo 承诺 bundle 里没有口令。检查两类来源：
+//   1. 构建环境文件里的口令：由 build-web.sh 通过 RBAC_FORBIDDEN_SECRETS 传进来
+//   2. 根目录 .env 里的 VITE_DEMO_*：Vite 会自动读它，进程变量置空只能覆盖
+//      Vite 的取值，不能阻止文件里本来就有的值被检查到
+// loadEnv 自己会让 process.env 覆盖文件值，所以取文件值前先把这几个键摘掉。
+const DEMO_SECRET_KEYS = ['ADMIN', 'EDITOR', 'VIEWER'].flatMap((role) => [
+  `VITE_DEMO_${role}_PASSWORD`,
+  `DEMO_${role}_PASSWORD`,
+]);
+
+function readEnvFilesOnly(keys) {
+  const saved = new Map(keys.map((key) => [key, process.env[key]]));
+  for (const key of keys) delete process.env[key];
+  const values = loadEnv('production', rootDir, '');
+  for (const [key, value] of saved) {
+    if (value === undefined) delete process.env[key];
+    else process.env[key] = value;
+  }
+  return values;
+}
+
+if (process.env.RBAC_BUILD_NO_DEMO === '1') {
+  const secrets = new Set(
+    (process.env.RBAC_FORBIDDEN_SECRETS || '').split('\n').filter(Boolean),
+  );
+  const fromEnvFiles = readEnvFilesOnly(DEMO_SECRET_KEYS);
+  for (const key of DEMO_SECRET_KEYS) {
+    if (fromEnvFiles[key]) secrets.add(fromEnvFiles[key]);
+  }
+  for (const secret of secrets) {
+    // 报错时只打前两位，不把口令写进构建日志
+    if (code.includes(secret)) {
+      failures.push(`--no-demo 构建里仍然包含演示口令（${secret.slice(0, 2)}***）`);
+    }
+  }
+}
+
 if (failures.length > 0) {
   console.error('[assert-build] 构建产物检查失败：');
   for (const failure of failures) {

@@ -10,3 +10,7 @@ trim_trailing_whitespace = true
 
 [*.md]
 trim_trailing_whitespace = false
+
+# Python 部署脚本跟随 PEP 8 的 4 空格
+[*.py]
+indent_size = 4
