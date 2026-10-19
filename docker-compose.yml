@@ -1,0 +1,126 @@
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+services:
+  mysql:
+    image: mysql:8.0
+    container_name: rbac-mysql
+    restart: unless-stopped
+    environment:
+      # 必填：缺省时 compose 直接失败，避免把 demo 弱口令带上线
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?MYSQL_ROOT_PASSWORD is required}
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-rbac_starter}
+      MYSQL_USER: ${MYSQL_USER:-rbac}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:?MYSQL_PASSWORD is required}
+      TZ: UTC
+    # 只绑回环：宿主机工具可连 127.0.0.1:3309，公网连不到
+    ports:
+      - "127.0.0.1:3309:3306"
+    volumes:
+      - mysql-data:/var/lib/mysql
+    # 面向 2GB 小机器：默认参数会按内存比例放大 buffer pool，这里手动收紧，
+    # 允许与宿主上已有服务（例如 console 的 3308）共存
+    command:
+      - --innodb-buffer-pool-size=128M
+      - --performance-schema=OFF
+      - --max-connections=50
+      - --table-open-cache=64
+    mem_limit: 640m
+    shm_size: 128mb
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 256
+    healthcheck:
+      # mysqladmin ping 在认证失败时也可能返回 0，必须执行真实查询
+      test:
+        [
+          "CMD-SHELL",
+          "MYSQL_PWD=\"$$MYSQL_ROOT_PASSWORD\" mysql -h 127.0.0.1 -uroot -e 'SELECT 1' >/dev/null 2>&1",
+        ]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 20s
+    logging: *default-logging
+
+  server:
+    build:
+      context: .
+      dockerfile: apps/server/Dockerfile
+    container_name: rbac-server
+    restart: on-failure:5
+    stop_grace_period: 30s
+    environment:
+      NODE_ENV: production
+      PORT: 3000
+      DATABASE_URL: mysql://${MYSQL_USER:-rbac}:${MYSQL_PASSWORD:?MYSQL_PASSWORD is required}@mysql:3306/${MYSQL_DATABASE:-rbac_starter}
+      JWT_SECRET: ${JWT_SECRET:?JWT_SECRET is required (openssl rand -base64 48)}
+      JWT_EXPIRES_IN: ${JWT_EXPIRES_IN:-12h}
+      # 生产默认不写演示数据；确需重置时显式打开两项
+      SEED_ON_START: ${SEED_ON_START:-false}
+      ALLOW_DEMO_SEED: ${ALLOW_DEMO_SEED:-false}
+      CORS_ORIGINS: ${CORS_ORIGINS:-}
+      RATE_LIMIT_PER_MINUTE: ${RATE_LIMIT_PER_MINUTE:-120}
+      ADMIN_EMAIL: ${ADMIN_EMAIL:-}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:-}
+      DEMO_ADMIN_EMAIL: ${DEMO_ADMIN_EMAIL:-}
+      DEMO_ADMIN_PASSWORD: ${DEMO_ADMIN_PASSWORD:-}
+      DEMO_EDITOR_EMAIL: ${DEMO_EDITOR_EMAIL:-}
+      DEMO_EDITOR_PASSWORD: ${DEMO_EDITOR_PASSWORD:-}
+      DEMO_VIEWER_EMAIL: ${DEMO_VIEWER_EMAIL:-}
+      DEMO_VIEWER_PASSWORD: ${DEMO_VIEWER_PASSWORD:-}
+    depends_on:
+      mysql:
+        condition: service_healthy
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    mem_limit: 384m
+    pids_limit: 128
+    # 应用不落盘：迁移与业务都只写数据库；需要临时文件时走 tmpfs
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    # 只绑回环；对外由宿主 nginx 反向代理
+    ports:
+      - "127.0.0.1:3020:3000"
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "wget -q -O /dev/null http://127.0.0.1:3000/api/health || exit 1",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+    logging: *default-logging
+
+  # 仅本地预览：docker compose --profile web up
+  # 生产由宿主 nginx 直接托管 apps/web/dist，避免子路径二次代理
+  web:
+    profiles: ["web"]
+    build:
+      context: .
+      dockerfile: apps/web/Dockerfile
+      args:
+        VITE_BASE: ${VITE_BASE:-/}
+        VITE_API_BASE: ${VITE_API_BASE:-/api}
+    container_name: rbac-web
+    restart: unless-stopped
+    depends_on:
+      server:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:8081:80"
+    mem_limit: 128m
+    logging: *default-logging
+
+volumes:
+  mysql-data:
+    # 固定卷名，避免与同机其它 compose 项目的卷混淆
+    name: rbac-mysql-data

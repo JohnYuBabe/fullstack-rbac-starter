@@ -1,0 +1,296 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+# 只读构建：所有 job 都不需要写仓库
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: build & test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 8.6.12
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install
+        run: pnpm install --frozen-lockfile
+
+      - name: Build shared
+        run: pnpm --filter @rbac/shared build
+
+      - name: Generate Prisma client
+        run: pnpm --filter @rbac/server exec prisma generate
+
+      - name: Typecheck server
+        run: pnpm --filter @rbac/server lint
+
+      - name: Test server
+        run: pnpm --filter @rbac/server test
+
+      - name: Build server
+        run: pnpm --filter @rbac/server build
+
+      # 线上走 /rbac/ 子路径；默认根路径构建不会暴露 base/api 前缀错误
+      - name: Build web for /rbac subpath
+        env:
+          VITE_BASE: /rbac/
+          VITE_API_BASE: /rbac/api
+          VITE_DEMO_ADMIN_EMAIL: demo-admin@rbac.test
+          VITE_DEMO_ADMIN_PASSWORD: demo-admin-password-12
+          VITE_DEMO_EDITOR_EMAIL: demo-editor@rbac.test
+          VITE_DEMO_EDITOR_PASSWORD: demo-editor-password-12
+          VITE_DEMO_VIEWER_EMAIL: demo-viewer@rbac.test
+          VITE_DEMO_VIEWER_PASSWORD: demo-viewer-password-12
+        run: pnpm --filter @rbac/web build
+
+      - name: Validate compose file
+        env:
+          MYSQL_ROOT_PASSWORD: ci-root
+          MYSQL_PASSWORD: ci-app
+          JWT_SECRET: ci-compose-value-not-used-anywhere-0123456789
+        run: docker compose config > /dev/null
+
+  e2e:
+    name: e2e rbac
+    runs-on: ubuntu-latest
+    services:
+      mysql:
+        image: mysql:8.0
+        env:
+          MYSQL_ROOT_PASSWORD: root
+          MYSQL_DATABASE: rbac_starter
+          MYSQL_USER: rbac
+          MYSQL_PASSWORD: rbac
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="mysql -h 127.0.0.1 -uroot -proot -e 'SELECT 1'"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=20
+    env:
+      DATABASE_URL: mysql://rbac:rbac@127.0.0.1:3306/rbac_starter
+      JWT_SECRET: ci-e2e-secret
+      # E2E 一个用例组会连续登录多次；限流按 IP 共享，放宽避免测试本身被 429
+      RATE_LIMIT_PER_MINUTE: 100
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 8.6.12
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install
+        run: pnpm install --frozen-lockfile
+
+      - name: Build shared
+        run: pnpm --filter @rbac/shared build
+
+      - name: Generate Prisma client
+        run: pnpm --filter @rbac/server exec prisma generate
+
+      - name: Migrate database
+        run: pnpm --filter @rbac/server exec prisma migrate deploy
+
+      - name: Seed database
+        run: pnpm --filter @rbac/server exec tsx prisma/seed.ts
+
+      - name: Run E2E tests
+        run: pnpm --filter @rbac/server test:e2e
+
+  docker:
+    name: docker images
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build server image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: apps/server/Dockerfile
+          push: false
+          load: true
+          tags: rbac-server:ci
+          cache-from: type=gha,scope=server
+          cache-to: type=gha,mode=max,scope=server
+
+      - name: Server image runs as non-root
+        run: |
+          # 命令失败时 $(...) 为空，直接 test "$uid" != "0" 会「通过」
+          set -euo pipefail
+          uid=$(docker run --rm --entrypoint id rbac-server:ci -u)
+          test -n "$uid"
+          test "$uid" != "0"
+
+      - name: Build web image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: apps/web/Dockerfile
+          push: false
+          # 生产走 /rbac/ 子路径：默认根路径构建不能证明镜像里的构建参数可用
+          build-args: |
+            VITE_BASE=/rbac/
+            VITE_API_BASE=/rbac/api
+          cache-from: type=gha,scope=web
+          cache-to: type=gha,mode=max,scope=web
+
+  smoke:
+    name: container smoke
+    runs-on: ubuntu-latest
+    needs: docker
+    services:
+      mysql:
+        image: mysql:8
+        env:
+          MYSQL_ROOT_PASSWORD: root
+          MYSQL_DATABASE: rbac_starter
+          MYSQL_USER: rbac
+          MYSQL_PASSWORD: rbac
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="mysql -h 127.0.0.1 -uroot -proot -e 'SELECT 1'"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=20
+    env:
+      JWT_SECRET: Zx9Kp2Vt7Qm4Lr8Ws6Nb3Hc5Jd1Fg0Ta
+      VIEWER_EMAIL: demo-viewer@rbac.test
+      VIEWER_PASSWORD: smoke-viewer-password-12
+      ADMIN_EMAIL: admin@rbac.test
+      ADMIN_PASSWORD: smoke-admin-password-16
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      # 用生产路径启动：migrate deploy → 生产 seed → 非 root 进程
+      - name: Build server image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: apps/server/Dockerfile
+          push: false
+          load: true
+          tags: rbac-server:smoke
+          cache-from: type=gha,scope=server
+
+      - name: Start server
+        run: |
+          docker run -d --name rbac-server --network host \
+            -e NODE_ENV=production \
+            -e PORT=3020 \
+            -e DATABASE_URL=mysql://rbac:rbac@127.0.0.1:3306/rbac_starter \
+            -e JWT_SECRET="$JWT_SECRET" \
+            -e SEED_ON_START=true \
+            -e ALLOW_DEMO_SEED=true \
+            -e ADMIN_EMAIL="$ADMIN_EMAIL" \
+            -e ADMIN_PASSWORD="$ADMIN_PASSWORD" \
+            -e DEMO_ADMIN_EMAIL=demo-admin@rbac.test \
+            -e DEMO_ADMIN_PASSWORD=smoke-admin-password-16 \
+            -e DEMO_EDITOR_EMAIL=demo-editor@rbac.test \
+            -e DEMO_EDITOR_PASSWORD=smoke-editor-password-12 \
+            -e DEMO_VIEWER_EMAIL="$VIEWER_EMAIL" \
+            -e DEMO_VIEWER_PASSWORD="$VIEWER_PASSWORD" \
+            rbac-server:smoke
+
+      - name: Wait for health
+        run: |
+          for _ in $(seq 1 60); do
+            if curl -fsS http://127.0.0.1:3020/api/health > /dev/null; then
+              exit 0
+            fi
+            sleep 2
+          done
+          docker logs rbac-server
+          exit 1
+
+      - name: Unauthorized without token
+        run: |
+          code=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:3020/api/articles)
+          test "$code" = "401"
+
+      - name: Viewer cannot write
+        run: |
+          set -euo pipefail
+          status=$(curl -s -o /tmp/login.json -w '%{http_code}' \
+            -X POST http://127.0.0.1:3020/api/auth/login \
+            -H 'Content-Type: application/json' \
+            -d "{\"email\":\"$VIEWER_EMAIL\",\"password\":\"$VIEWER_PASSWORD\"}")
+          test "$status" = "200"
+          token=$(jq -r .accessToken /tmp/login.json)
+          test "$token" != "null"
+
+          read_code=$(curl -s -o /dev/null -w '%{http_code}' \
+            -H "Authorization: Bearer $token" \
+            http://127.0.0.1:3020/api/articles)
+          test "$read_code" = "200"
+
+          write_code=$(curl -s -o /dev/null -w '%{http_code}' \
+            -X POST http://127.0.0.1:3020/api/articles \
+            -H "Authorization: Bearer $token" \
+            -H 'Content-Type: application/json' \
+            -d '{"title":"viewer 不该写进来","content":"x"}')
+          test "$write_code" = "403"
+
+      - name: Admin write leaves an audit record
+        run: |
+          set -euo pipefail
+          status=$(curl -s -o /tmp/admin.json -w '%{http_code}' \
+            -X POST http://127.0.0.1:3020/api/auth/login \
+            -H 'Content-Type: application/json' \
+            -d "{\"email\":\"$ADMIN_EMAIL\",\"password\":\"$ADMIN_PASSWORD\"}")
+          test "$status" = "200"
+          token=$(jq -r .accessToken /tmp/admin.json)
+
+          created=$(curl -s -X POST http://127.0.0.1:3020/api/articles \
+            -H "Authorization: Bearer $token" \
+            -H 'Content-Type: application/json' \
+            -d '{"title":"smoke 文章","content":"由 CI 创建"}')
+          id=$(echo "$created" | jq -r .id)
+          test "$id" != "null"
+
+          curl -fsS -H "Authorization: Bearer $token" \
+            "http://127.0.0.1:3020/api/audit-logs?pageSize=50" \
+            | jq -e --arg id "$id" \
+              '.items[] | select(.action == "article.create" and .resourceId == $id)'
+
+      - name: Dev seed passwords are rejected in production
+        run: |
+          # 生产 seed 不建本地开发账号；admin@example.com / admin123 必须登录失败
+          code=$(curl -s -o /dev/null -w '%{http_code}' \
+            -X POST http://127.0.0.1:3020/api/auth/login \
+            -H 'Content-Type: application/json' \
+            -d '{"email":"admin@example.com","password":"admin123"}')
+          test "$code" = "401"
+
+      - name: Dump logs on failure
+        if: failure()
+        run: docker logs rbac-server || true

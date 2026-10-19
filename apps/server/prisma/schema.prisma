@@ -1,0 +1,104 @@
+// 权限模型：User --< UserRole >-- Role --< RolePermission >-- Permission
+// 权限用 `资源:动作` 表示，角色只是权限的预设组合——改角色等于改用户的权限集合，
+// 因为 JwtStrategy 每个请求都会回查数据库重建 AuthUser，不做 JWT 快照。
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "mysql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id           String     @id @default(cuid())
+  email        String     @unique
+  passwordHash String
+  name         String
+  createdAt    DateTime   @default(now())
+  updatedAt    DateTime   @updatedAt
+  roles        UserRole[]
+  articles     Article[]  @relation("ArticleAuthor")
+  auditLogs    AuditLog[] @relation("AuditActor")
+
+  @@map("users")
+}
+
+model Role {
+  id          String           @id @default(cuid())
+  name        String           @unique
+  description String?
+  createdAt   DateTime         @default(now())
+  users       UserRole[]
+  permissions RolePermission[]
+
+  @@map("roles")
+}
+
+model Permission {
+  id       String           @id @default(cuid())
+  resource String
+  action   String
+  roles    RolePermission[]
+
+  @@unique([resource, action])
+  @@map("permissions")
+}
+
+model UserRole {
+  userId String
+  roleId String
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  role   Role   @relation(fields: [roleId], references: [id], onDelete: Cascade)
+
+  @@id([userId, roleId])
+  @@map("user_roles")
+}
+
+model RolePermission {
+  roleId       String
+  permissionId String
+  role         Role       @relation(fields: [roleId], references: [id], onDelete: Cascade)
+  permission   Permission @relation(fields: [permissionId], references: [id], onDelete: Cascade)
+
+  @@id([roleId, permissionId])
+  @@map("role_permissions")
+}
+
+model Article {
+  id        String   @id @default(cuid())
+  title     String   @db.VarChar(120)
+  content   String   @db.Text
+  authorId  String
+  author    User     @relation("ArticleAuthor", fields: [authorId], references: [id])
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([authorId])
+  @@map("articles")
+}
+
+// 审计记录是业务写入的一部分：两者在同一个事务里提交，
+// 因此不会出现「文章改成功了但没留下记录」。actorEmail 与 roleNames 是快照，
+// 用户被删除或改角色后，历史记录仍然说明当时是谁、以什么身份做的。
+model AuditLog {
+  id           String   @id @default(cuid())
+  actorId      String?
+  actor        User?    @relation("AuditActor", fields: [actorId], references: [id], onDelete: SetNull)
+  actorEmail   String   @db.VarChar(191)
+  roleNames    String   @db.VarChar(191)
+  action       String   @db.VarChar(40)
+  resourceType String   @db.VarChar(40)
+  resourceId   String   @db.VarChar(64)
+  summary      String   @db.VarChar(500)
+  before       Json?
+  after        Json?
+  ip           String?  @db.VarChar(64)
+  createdAt    DateTime @default(now())
+
+  @@index([createdAt])
+  @@index([actorId])
+  @@index([resourceType, resourceId])
+  @@map("audit_logs")
+}

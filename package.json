@@ -1,0 +1,27 @@
+{
+  "name": "fullstack-rbac-starter",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Fullstack RBAC starter: resource:action permissions, menu/route/button control, audit log.",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/JohnYuBabe/fullstack-rbac-starter.git"
+  },
+  "packageManager": "pnpm@8.6.12",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "predev": "pnpm --filter @rbac/shared build",
+    "dev": "pnpm -r --parallel dev",
+    "build": "pnpm --filter @rbac/shared build && pnpm --filter @rbac/server build && pnpm --filter @rbac/web build",
+    "test": "pnpm -r test",
+    "lint": "pnpm -r lint",
+    "db:up": "docker compose up -d mysql",
+    "db:down": "docker compose down",
+    "db:migrate": "pnpm --filter @rbac/server prisma:migrate",
+    "db:seed": "pnpm --filter @rbac/server prisma:seed",
+    "db:studio": "pnpm --filter @rbac/server prisma:studio"
+  }
+}

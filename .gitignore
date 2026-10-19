@@ -1,0 +1,24 @@
+node_modules/
+dist/
+coverage/
+.vite/
+*.tsbuildinfo
+
+.env
+.env.*
+!.env.example
+
+*.log
+.DS_Store
+
+mysql-data/
+uploads/
+
+# 部署时可能留在本地的证书与密钥
+*.pem
+*.key
+*.p12
+dist.prev/
+
+# 个人编辑器/本地工具配置
+.claude/settings.local.json
