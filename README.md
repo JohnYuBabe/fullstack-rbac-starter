@@ -68,8 +68,10 @@ pnpm dev
 `rbac` 用户只有单库权限，若报 `P3014`，改用 root 连接执行一次，或直接
 `pnpm --filter @rbac/server prisma:deploy` 应用仓库里已有的迁移。
 
-全仓只有根目录一份 `.env`：Nest 的 `ConfigModule` 与 Vite 都读它。本地是 `VITE_BASE=/` 与
-`VITE_API_BASE=/api`；部署到 `/rbac/` 时两个都要改（`/rbac/` 与 `/rbac/api`），不建议在别处再维护一份前端配置。
+本地开发时，Nest 的 `ConfigModule` 与 Vite 都读根目录的 `.env`（`VITE_BASE=/`、
+`VITE_API_BASE=/api`）。部署到 `/rbac/` 时换一份 `.env.deploy`，由
+`deploy/build-web.sh --env .env.deploy` 在构建期注入前缀与演示账号；它只给构建用，
+不参与后端启动。两份文件都不进仓库。
 
 | 账号 | 密码 | 角色 |
 | --- | --- | --- |
@@ -132,6 +134,11 @@ E2E 走真实 HTTP（随机端口 + fetch），覆盖：无 token 401、viewer �
 - 端口 `3020`（宿主回环）/ MySQL `3309` / 卷 `rbac-mysql-data`，专为与同机其它项目共存而错开。
 - 前端 token key 是 `vibe_rbac_token`；同域多站点共用 `localStorage` 时不会互相踢下线。
 - `/rbac/` 的 nginx location 必须**合并**进现有站点配置，不能整份覆盖。
+- 前端用 `deploy/build-web.sh --env .env.deploy` 构建：子路径前缀与演示账号是构建期注入的，
+  变量落在一个显式文件里，换台机器也能构建出同一份产物。
+- 片段用 `deploy/apply-nginx.py` 合并：只在唯一匹配的 443 server 块里插入，写完跑
+  `nginx -t`、reload、探活，失败自动还原。`assets` 与 `api` 使用 `^~`，否则会被面板默认的
+  `\.(js|css)$` 正则 location 截走，表现为白屏。
 
 ## 已知限制
 

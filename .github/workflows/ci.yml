@@ -60,6 +60,16 @@ jobs:
           VITE_DEMO_VIEWER_PASSWORD: demo-viewer-password-12
         run: pnpm --filter @rbac/web build
 
+      # 部署脚本不进镜像、不被测试覆盖，至少保证语法没坏
+      - name: Check deploy scripts
+        run: |
+          bash -n deploy/build-web.sh
+          python3 -m py_compile deploy/apply-nginx.py
+
+      # 配置改写脚本面对的是线上 nginx，回归用例必须随 CI 跑
+      - name: Test apply-nginx
+        run: python3 deploy/test_apply_nginx.py
+
       - name: Validate compose file
         env:
           MYSQL_ROOT_PASSWORD: ci-root

@@ -22,3 +22,7 @@ dist.prev/
 
 # 个人编辑器/本地工具配置
 .claude/settings.local.json
+
+# Python 语法检查产生的缓存
+__pycache__/
+*.pyc
